@@ -1,4 +1,4 @@
-name: Production CI/CD Pipeline
+name: Production CI/CD Pipeline (Zero-Touch)
 
 on:
   push:
@@ -7,18 +7,14 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  # Автоматически возьмет "zaleshchikov/epub-ai" из названия вашего репозитория
-  IMAGE_NAME: ${{ github.repository }} 
+  IMAGE_NAME: ${{ github.repository }}
 
 jobs:
-  # ==========================================
-  # ЭТАП 1: CI (Сборка и проверка)
-  # ==========================================
   build-and-test:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write # Разрешение на запись в GitHub Container Registry
+      packages: write
 
     steps:
       - name: Checkout repository
@@ -34,9 +30,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Если добавите тесты, раскомментируйте:
-          # pip install pytest pytest-asyncio
-          # pytest tests/
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -64,36 +57,36 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  # ==========================================
-  # ЭТАП 2: CD (Деплой на VPS)
-  # ==========================================
   deploy:
-    needs: build-and-test # Запускается ТОЛЬКО если сборка успешна
+    needs: build-and-test
     runs-on: ubuntu-latest
     steps:
-      - name: Deploy to VPS via SSH
-        uses: appleboy/ssh-action@v1.0.3
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup SSH Agent
+        uses: webfactory/ssh-agent@v0.9.0
         with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USERNAME }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: 22
-          script: |
-            echo "🚀 Начало деплоя на VPS..."
-            
-            # 1. Логинимся в GHCR на сервере, чтобы скачать приватный образ
-            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            
-            # 2. Переходим в папку проекта (имя папки epub-ai)
-            cd ~/epub-ai
-            
-            # 3. Скачиваем НОВЫЙ готовый образ (быстро, без сборки на VPS!)
-            docker compose pull backend
-            
-            # 4. Перезапускаем только backend с новым образом
-            docker compose up -d backend
-            
-            # 5. Чистим старые неиспользуемые образы, чтобы не забивать диск VPS
-            docker image prune -f
-            
-            echo "✅ Деплой успешно завершен!"
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+
+      - name: Zero-Touch Deploy to VPS
+        run: |
+          echo "🚀 Подключение к VPS и запуск bootstrap скрипта..."
+          
+          ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null ${{ secrets.VPS_USERNAME }}@${{ secrets.VPS_HOST }} " \
+            cd ~ && \
+            if [ ! -d 'epub-ai' ]; then \
+              git clone https://${GH_USER}:${GH_TOKEN}@github.com/${GH_REPO}.git epub-ai; \
+            fi && \
+            cd epub-ai && \
+            git fetch origin && \
+            git reset --hard origin/main && \
+            chmod +x scripts/bootstrap.sh && \
+            GH_USER=${GH_USER} GH_TOKEN=${GH_TOKEN} GH_REPO=${GH_REPO} bash scripts/bootstrap.sh \
+          "
+          
+          echo "✅ Деплой завершен!"
+        env:
+          GH_USER: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
