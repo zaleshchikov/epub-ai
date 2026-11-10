@@ -25,11 +25,22 @@ else
     echo "✅ Ollama уже установлен."
 fi
 
-# 3. Загрузка модели
+# 3. НАСТРОЙКА СЕТИ OLLAMA (Критически важно для связи с Docker)
+echo "⚙️ Настройка Ollama для доступа из Docker-контейнеров (0.0.0.0)..."
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+cat <<EOF | sudo tee /etc/systemd/system/ollama.service.d/override.conf > /dev/null
+[Service]
+Environment="OLLAMA_HOST=0.0.0.0:11434"
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart ollama
+echo "✅ Ollama теперь слушает все интерфейсы."
+
+# 4. Загрузка модели (идемпотентно: если есть, просто проверит хэш)
 echo "⏳ Проверка/загрузка модели qwen2.5:7b..."
 ollama pull qwen2.5:7b
 
-# 4. Клонирование или обновление репозитория
+# 5. Клонирование или обновление репозитория
 if [ ! -d "$HOME/epub-ai" ]; then
     echo "📥 Клонирование репозитория..."
     git clone https://${GH_USER}:${GH_TOKEN}@github.com/${GH_REPO}.git $HOME/epub-ai
@@ -44,7 +55,7 @@ fi
 
 cd $HOME/epub-ai
 
-# 5. Создание .env файла, если его нет
+# 6. Создание .env файла, если его нет
 if [ ! -f ".env" ]; then
     echo "⚙️ Создание базового .env файла..."
     cat <<EOF > .env
@@ -60,7 +71,7 @@ EOF
     echo "✅ .env файл создан."
 fi
 
-# 6. Запуск или перезапуск сервисов
+# 7. Запуск или перезапуск сервисов
 echo "🐳 Запуск Docker Compose..."
 sudo docker compose pull backend
 sudo docker compose up -d
