@@ -1,10 +1,12 @@
-fastapi==0.115.0
-uvicorn==0.30.6
-asyncpg==0.29.0
-pydantic==2.9.2
-python-multipart==0.0.12
-openai==1.50.0
-ebooklib==0.18
-beautifulsoup4==4.12.3
-lxml==5.3.0
-python-dotenv==1.0.1
+fastapi
+uvicorn[standard]
+asyncpg
+python-multipart
+python-dotenv
+ebooklib
+beautifulsoup4
+lxml
+
+# КРИТИЧЕСКИ ВАЖНО: Фиксируем совместимые версии!
+httpx==0.27.2
+openai==1.51.0
