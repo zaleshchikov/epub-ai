@@ -33,8 +33,19 @@ cat <<EOF | sudo tee /etc/systemd/system/ollama.service.d/override.conf > /dev/n
 Environment="OLLAMA_HOST=0.0.0.0:11434"
 EOF
 sudo systemctl daemon-reload
+sudo systemctl enable --now ollama
 sudo systemctl restart ollama
-echo "✅ Ollama теперь слушает все интерфейсы."
+
+# Даем сервису 2 секунды на полноценный запуск и открытие сокета
+sleep 2
+
+# Проверяем, что сервис действительно отвечает, прежде чем идти дальше
+if ! curl -s http://localhost:11434 > /dev/null; then
+    echo "⚠️ Ollama не отвечает, пытаемся перезапустить еще раз..."
+    sudo systemctl restart ollama
+    sleep 3
+fi
+echo "✅ Ollama теперь слушает все интерфейсы и готов к работе."
 
 # 4. Загрузка модели 14B (идемпотентно: если есть, просто проверит хэш)
 echo "⏳ Проверка/загрузка модели qwen2.5:14b..."
