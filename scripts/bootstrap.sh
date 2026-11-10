@@ -36,9 +36,9 @@ sudo systemctl daemon-reload
 sudo systemctl restart ollama
 echo "✅ Ollama теперь слушает все интерфейсы."
 
-# 4. Загрузка модели (идемпотентно: если есть, просто проверит хэш)
-echo "⏳ Проверка/загрузка модели qwen2.5:7b..."
-ollama pull qwen2.5:7b
+# 4. Загрузка модели 14B (идемпотентно: если есть, просто проверит хэш)
+echo "⏳ Проверка/загрузка модели qwen2.5:14b..."
+ollama pull qwen2.5:14b
 
 # 5. Клонирование или обновление репозитория
 if [ ! -d "$HOME/epub-ai" ]; then
@@ -55,7 +55,7 @@ fi
 
 cd $HOME/epub-ai
 
-# 6. Создание .env файла, если его нет
+# 6. Создание или обновление .env файла
 if [ ! -f ".env" ]; then
     echo "⚙️ Создание базового .env файла..."
     cat <<EOF > .env
@@ -65,10 +65,14 @@ DB_HOST=db
 DB_PORT=5432
 DB_NAME=epub_ai
 LLM_BASE_URL=http://host.docker.internal:11434/v1
-LLM_MODEL=qwen2.5:7b
+LLM_MODEL=qwen2.5:14b
 LLM_API_KEY=ollama
 EOF
     echo "✅ .env файл создан."
+else
+    # Если файл уже есть, принудительно обновляем модель на 14b (на случай апгрейда)
+    sed -i 's/LLM_MODEL=qwen2.5:7b/LLM_MODEL=qwen2.5:14b/g' .env
+    echo "✅ .env файл проверен и обновлен до модели 14b."
 fi
 
 # 7. Запуск или перезапуск сервисов
