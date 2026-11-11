@@ -73,6 +73,74 @@ async def upload_epub(file: UploadFile = File(...), user_id: str = "test-user"):
         "sha256": parsed["sha256"],
     }
 
+class SummarizeRequest(BaseModel):
+    book_id: str
+    read_pos: CanonicalPos
+    language: str = "ru"
+
+@app.post("/v1/ai/summarize_up_to")
+async def summarize_up_to(req: SummarizeRequest):
+    conn = await get_db()
+    try:
+        # 1. Получаем ВСЕ безопасные саммари до указанной позиции, в хронологическом порядке
+        rows = await conn.fetch(
+            """SELECT summary_past_safe FROM beats 
+               WHERE book_id = $1 AND end_char <= $2 
+               ORDER BY start_char ASC""",
+            req.book_id, req.read_pos.char_offset
+        )
+        
+        if not rows:
+            return {
+                "summary": "Вы находитесь в самом начале книги, пересказывать пока нечего.",
+                "beats_used": 0
+            }
+
+        # 2. Собираем их в один текст
+        # Форматируем как список событий для лучшего понимания моделью
+        context_events = "\n".join([f"- {row['summary_past_safe']}" for row in rows])
+        
+    finally:
+        await release_db(conn)
+
+    # 3. Промпт, заточенный на связный пересказ (без JSON, строго по фактам)
+    system_prompt = """
+Ты литературный редактор. Твоя задача — написать связный, плавный пересказ сюжета книги ДО текущего момента.
+
+КРИТИЧЕСКИ ВАЖНЫЕ ПРАВИЛА:
+1. Отвечай ТОЛЬКО обычным связным текстом на РУССКОМ языке.
+2. КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать JSON, фигурные скобки {}, ключи "ответ"/"response" или markdown-списки.
+3. Объедини разрозненные факты из предоставленного списка в единый рассказ (2-4 абзаца).
+4. Соблюдай хронологический порядок событий.
+5. Используй ТОЛЬКО предоставленные факты. НИЧЕГО не придумывай и не добавляй события, которых нет в списке.
+6. Пиши в прошедшем времени.
+"""
+
+    user_prompt = f"""
+Создай связный пересказ сюжета на основе этих хронологических событий:
+
+{context_events}
+
+Требование: сделай текст плавным и литературным, как аннотацию к прочитанной части.
+"""
+
+    # 4. Вызов LLM
+    answer = await call_llm(system_prompt, user_prompt, temperature=0.2) # Низкая температура для точности
+
+    # 5. Легкая страховка от JSON (на случай, если модель всё же решит "помочь")
+    import json
+    if answer.strip().startswith('{'):
+        try:
+            parsed = json.loads(answer)
+            if isinstance(parsed, dict):
+                answer = parsed.get("ответ") or parsed.get("response") or answer
+        except:
+            pass
+
+    return {
+        "summary": answer.strip(),
+        "beats_used": len(rows)
+    }
 
 # ==========================================
 # 2. ИНДЕКСАЦИЯ (с пулом соединений)
