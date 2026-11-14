@@ -24,6 +24,8 @@ services:
       - LLM_BASE_URL=http://host.docker.internal:11434/v1
       - LLM_MODEL=${LLM_MODEL:-qwen2.5:14b}
       - LLM_API_KEY=ollama
+      # Whitelist фронтенд-origins через запятую; когда появится домен фронта — добавить в .env
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       
     ports:
       - "8000:8000"

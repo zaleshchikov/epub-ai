@@ -1,7 +1,9 @@
 import json
 import hashlib
+import os
 import uuid
 from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
 
@@ -10,9 +12,23 @@ from app.services.epub_parser import parse_epub
 from app.services.chunker import chunk_text
 from app.services.indexer import index_chunk
 from app.services.retriever import get_allowed_beats
-from app.services.llm import call_llm
+from app.services.llm import call_llm, clean_llm_response
 
 app = FastAPI(title="EPUB AI Agent v0.2 (LLM-driven structure)")
+
+# CORS: явный whitelist origins (переменная CORS_ORIGINS, через запятую).
+# Комбинация allow_origins=["*"] + allow_credentials=True невалидна по спеке — не используем.
+CORS_ORIGINS = [o.strip() for o in os.getenv(
+    "CORS_ORIGINS", "http://localhost:3000,http://localhost:5173"
+).split(",") if o.strip()]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Стоп-слова для пост-проверки на спойлеры
 SPOILER_KEYWORDS = ["позже выяснится", "в конце", "окажется", "в финале", "затем", "вскоре"]
@@ -52,15 +68,17 @@ async def upload_epub(file: UploadFile = File(...), user_id: str = "test-user"):
     book_id = str(uuid.uuid4())
     conn = await get_db()
     try:
-        await conn.execute(
-            """INSERT INTO books (id, user_id, sha256, title, status)
-               VALUES ($1, $2, $3, $4, 'pending')""",
-            book_id, user_id, parsed["sha256"], parsed["title"],
-        )
-        await conn.execute(
-            "INSERT INTO book_text (book_id, full_text) VALUES ($1, $2)",
-            book_id, parsed["full_text"],
-        )
+        # Транзакция: либо обе записи, либо ни одной (без книг-сирот)
+        async with conn.transaction():
+            await conn.execute(
+                """INSERT INTO books (id, user_id, sha256, title, status)
+                   VALUES ($1, $2, $3, $4, 'pending')""",
+                book_id, user_id, parsed["sha256"], parsed["title"],
+            )
+            await conn.execute(
+                "INSERT INTO book_text (book_id, full_text) VALUES ($1, $2)",
+                book_id, parsed["full_text"],
+            )
     except Exception as e:
         raise HTTPException(500, f"Ошибка сохранения в БД: {e}")
     finally:
@@ -124,18 +142,11 @@ async def summarize_up_to(req: SummarizeRequest):
 Требование: сделай текст плавным и литературным, как аннотацию к прочитанной части.
 """
 
-    # 4. Вызов LLM
-    answer = await call_llm(system_prompt, user_prompt, temperature=0.2) # Низкая температура для точности
+    # 4. Вызов LLM: json_mode=False — нужна проза, без принудительного JSON
+    answer = await call_llm(system_prompt, user_prompt, temperature=0.2, json_mode=False)
 
-    # 5. Легкая страховка от JSON (на случай, если модель всё же решит "помочь")
-    import json
-    if answer.strip().startswith('{'):
-        try:
-            parsed = json.loads(answer)
-            if isinstance(parsed, dict):
-                answer = parsed.get("ответ") or parsed.get("response") or answer
-        except:
-            pass
+    # 5. Универсальный очиститель: снимет JSON-обёртку, двойную упаковку и code fences
+    answer = clean_llm_response(answer)
 
     return {
         "summary": answer.strip(),
@@ -238,7 +249,18 @@ async def analyze_text(req: AnalyzeRequest):
         
         cached = await conn.fetchval("SELECT response FROM ai_cache WHERE hash = $1", cache_hash)
         if cached:
-            return {"answer": cached, "cached": True, "used_beats": []}
+            # asyncpg отдаёт JSONB строкой, внутри лежит {"answer": "..."} — распаковываем.
+            # Работает и со старыми записями кэша, и с plain-строками.
+            cached_answer = cached
+            try:
+                data = json.loads(cached) if isinstance(cached, str) else cached
+                if isinstance(data, dict) and isinstance(data.get("answer"), str):
+                    cached_answer = data["answer"]
+                elif isinstance(data, str):
+                    cached_answer = data
+            except (json.JSONDecodeError, TypeError):
+                pass
+            return {"answer": cached_answer, "cached": True, "used_beats": []}
 
         # 2. Spoiler-safe retrieval
         allowed_beats = await get_allowed_beats(conn, req.book_id, req.read_pos.char_offset)
@@ -288,7 +310,8 @@ ALLOWED_BEATS (только уже прочитанное):
 Задача: объясни выделенный текст с учётом контекста. Язык: {req.language}.
 """
 
-    answer = await call_llm(system_prompt, user_prompt, temperature=0.3)
+    answer = await call_llm(system_prompt, user_prompt, temperature=0.3, json_mode=False)
+    answer = clean_llm_response(answer)
 
     # Post-check на спойлеры
     for kw in SPOILER_KEYWORDS:
