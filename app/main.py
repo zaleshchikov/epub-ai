@@ -115,7 +115,6 @@ async def summarize_up_to(req: SummarizeRequest):
             }
 
         # 2. Собираем их в один текст
-        # Форматируем как список событий для лучшего понимания моделью
         context_events = "\n".join([f"- {row['summary_past_safe']}" for row in rows])
         
     finally:
@@ -175,8 +174,10 @@ async def index_book(book_id: str):
     finally:
         await release_db(conn)
 
-    # Нарезка на чанки
-    chunks = chunk_text(full_text, chunk_size=3000, overlap=300)
+    # Нарезка на чанки.
+    # FIX: chunk_size=2000 <= лимита индексатора [:2000] -> каждый чанк
+    # обрабатывается целиком, дыр покрытия между чанками больше нет.
+    chunks = chunk_text(full_text, chunk_size=2000, overlap=200)
     print(f"[index] Книга разбита на {len(chunks)} чанков")
 
     beat_counter = 0
@@ -243,14 +244,18 @@ async def index_book(book_id: str):
 async def analyze_text(req: AnalyzeRequest):
     conn = await get_db()
     try:
-        # 1. Проверка кэша
-        cache_raw = f"{req.user_id}|{req.book_id}|{req.selected_text}|{req.read_pos.model_dump_json()}"
+        # 1. Проверка кэша.
+        # FIX: в ключ входят language, mode и local_context — иначе ответ
+        # с другим контекстом/языком ошибочно брался из кэша.
+        cache_raw = (
+            f"{req.user_id}|{req.book_id}|{req.selected_text}|{req.read_pos.model_dump_json()}"
+            f"|{req.language}|{req.mode}|{json.dumps(req.local_context, ensure_ascii=False, sort_keys=True)}"
+        )
         cache_hash = hashlib.sha256(cache_raw.encode()).hexdigest()
         
         cached = await conn.fetchval("SELECT response FROM ai_cache WHERE hash = $1", cache_hash)
         if cached:
-            # asyncpg отдаёт JSONB строкой, внутри лежит {"answer": "..."} — распаковываем.
-            # Работает и со старыми записями кэша, и с plain-строками.
+            # asyncpg отдаёт JSONB строкой, внутри {"answer": "...", "book_id": "..."} — распаковываем.
             cached_answer = cached
             try:
                 data = json.loads(cached) if isinstance(cached, str) else cached
@@ -262,7 +267,7 @@ async def analyze_text(req: AnalyzeRequest):
                 pass
             return {"answer": cached_answer, "cached": True, "used_beats": []}
 
-        # 2. Spoiler-safe retrieval
+        # 2. Spoiler-safe retrieval (retriever отдаёт в хронологическом порядке)
         allowed_beats = await get_allowed_beats(conn, req.book_id, req.read_pos.char_offset)
     finally:
         await release_db(conn)
@@ -319,12 +324,12 @@ ALLOWED_BEATS (только уже прочитанное):
             answer = "В доступном пока контексте этого нет — читайте дальше."
             break
 
-    # Сохранение в кэш
+    # Сохранение в кэш (book_id внутри JSONB — для очистки при удалении книги, без миграции)
     conn = await get_db()
     try:
         await conn.execute(
             "INSERT INTO ai_cache (hash, response) VALUES ($1, $2)",
-            cache_hash, json.dumps({"answer": answer}, ensure_ascii=False),
+            cache_hash, json.dumps({"answer": answer, "book_id": req.book_id}, ensure_ascii=False),
         )
     finally:
         await release_db(conn)
@@ -355,7 +360,9 @@ async def book_status(book_id: str):
 async def delete_book(book_id: str):
     conn = await get_db()
     try:
-        await conn.execute("DELETE FROM ai_cache WHERE hash LIKE $1", f"%{book_id}%")
+        # FIX: чистим кэш по book_id внутри JSONB (старый LIKE по sha256 не матчился никогда).
+        # Legacy-записи без book_id останутся — они безвредны, новые пишутся с book_id.
+        await conn.execute("DELETE FROM ai_cache WHERE response->>'book_id' = $1", book_id)
         await conn.execute("DELETE FROM books WHERE id = $1", book_id)
         return {"status": "deleted", "book_id": book_id}
     finally:

@@ -99,6 +99,9 @@ async def index_chunk(chunk_text: str, chunk_start: int, book_id: str, beat_coun
             
         if s_char < 0: s_char = 0
         if e_char < s_char: e_char = s_char + 100
+        # FIX: оффсеты не могут выходить за пределы реально обработанного текста
+        if s_char > len(text_to_process): s_char = len(text_to_process)
+        if e_char > len(text_to_process): e_char = len(text_to_process)
 
         raw_summary = str(b.get("summary_past_safe", "Нет описания"))
         clean_summary = raw_summary.replace('\n', ' ').strip()[:500]
